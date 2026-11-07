@@ -148,7 +148,8 @@ _CONTEXT_FILES_INTRO = (
 )
 _COMPLETION_INSTRUCTIONS = (
     "\nComplete this task using the tools available to you. When finished, provide a clear, concise summary of:\n"
-    "- What you did\n- What you found or accomplished\n- Any files you created or modified\n- Any issues encountered\n\n"
+    "- What you did\n- What you found or accomplished\n- Any files you created or modified\n- Any issues encountered\n"
+    "- Key pitfalls or lessons learned (if you discovered non-obvious quirks or environment facts)\n\n"
     "Important workspace rule: Never assume a repository lives at /workspace/... or any other container-style path "
     "unless the task/context explicitly gives that path. If no exact local path is provided, discover it first before "
     "issuing git/workdir-specific commands.\n\n"
@@ -180,7 +181,7 @@ _NESTED_CHILDREN_NOTE = (
 
 def _build_child_system_prompt(
     goal: str, context: Optional[str] = None, *, workspace_path: Optional[str] = None, role: str = "leaf",
-    max_spawn_depth: int = 2, child_depth: int = 1,
+    max_spawn_depth: int = 2, child_depth: int = 1, memory_context: Optional[str] = None,
 ) -> str:
     """Focused system prompt for a child agent. role='orchestrator' appends a delegation-capability block (modeled on
     OpenClaw's buildSubagentSystemPrompt); its depth note is literal truth grounded in the passed config so the LLM
@@ -189,6 +190,12 @@ def _build_child_system_prompt(
     # Keeping it out of the system prompt avoids sending OAuth Anthropic the
     # same task in both roles, while preserving the normal user-turn contract.
     parts = ["You are a focused subagent working on a specific delegated task."]
+    if memory_context and str(memory_context).strip():
+        parts.append(
+            "\nRELEVANT REPOSITORY & USER CONTEXT (from parent session):\n"
+            f"{memory_context.strip()}\n"
+            "(Note: This context is read-only for your reference; you cannot call the memory tool.)"
+        )
     if context and context.strip():
         parts.append(f"\nCONTEXT:\n{context}")
     if workspace_path and str(workspace_path).strip():

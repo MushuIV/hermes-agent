@@ -326,6 +326,11 @@ def get_default_hermes_root(*, home: str | Path | None = None) -> Path:
     return result
 
 
+def get_shared_hermes_dir() -> Path:
+    """Return the shared Hermes directory (<default-hermes-root>/shared) for cross-profile resources."""
+    return get_default_hermes_root() / "shared"
+
+
 # Tombstone lives beside the profile dir (not inside) so a stale mkdir or rmtree cannot erase it.
 _DELETED_PROFILES_DIR = ".deleted"
 # Files marking a real Hermes home; arbitrary dirs with a ``profiles`` segment lack them.

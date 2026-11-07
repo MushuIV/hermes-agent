@@ -419,6 +419,13 @@ def get_skill_search_roots(local: Optional[Path] = None, *, include_project: boo
     create_dir = get_skill_create_dir()
     if create_dir is not None and create_dir.is_dir():
         roots.append((TIER_CREATE_DIR, create_dir))
+    try:
+        from hermes_constants import get_shared_hermes_dir
+        shared_skills = get_shared_hermes_dir() / "skills"
+        if shared_skills.is_dir():
+            roots.append((TIER_EXTERNAL, shared_skills))
+    except Exception:
+        pass
     roots += [(TIER_EXTERNAL, d) for d in get_external_skills_dirs()]
     seen: set[Path] = set()
     return [(t, d) for t, d in roots if not (d in seen or seen.add(d))]

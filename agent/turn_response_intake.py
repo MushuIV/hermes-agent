@@ -184,6 +184,20 @@ def normalize_model_response(
     if assistant_message.content is not None and not isinstance(assistant_message.content, str):
         assistant_message.content = _coerce_content_text(assistant_message.content)
 
+    # Multi-dialect local model tool-call rescue:
+    # If the provider/model emitted tool calls directly into content without populating
+    # assistant_message.tool_calls, rescue them before post-hooks and before display stripping.
+    if not getattr(assistant_message, "tool_calls", None) and assistant_message.content:
+        from agent.local_tool_call_parser import rescue_tool_calls_from_content
+        valid_tools = getattr(agent, "valid_tool_names", None)
+        tool_defs = getattr(agent, "tools", None)
+        cleaned_content, rescued_calls = rescue_tool_calls_from_content(
+            assistant_message.content, valid_tool_names=valid_tools, tool_defs=tool_defs
+        )
+        if rescued_calls:
+            assistant_message.tool_calls = rescued_calls
+            assistant_message.content = cleaned_content
+
     # Agent-as-provider projection: splice the provider-agent's own tool work in as
     # call/result rows before this turn's assistant message; no-op for ordinary providers.
     splice_provider_projection(agent, response, messages)

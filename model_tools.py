@@ -7,6 +7,7 @@ hooks/middleware) plus registry pass-throughs.
 """
 
 import os
+import sys
 import json
 import re
 import asyncio
@@ -172,7 +173,27 @@ TOOL_TO_TOOLSET_MAP: dict[str, str] = registry.get_tool_to_toolset_map()
 TOOLSET_REQUIREMENTS: dict[str, dict] = registry.get_toolset_requirements()
 
 # Tool names from the last get_tool_definitions() call (execute_code sandbox fallback).
+# Process fallback for legacy non-context callers:
 _last_resolved_tool_names: list[str] = []
+_last_resolved_tool_names_var: ContextVar[Optional[list[str]]] = ContextVar(
+    "_last_resolved_tool_names_var", default=None
+)
+
+
+def get_last_resolved_tool_names() -> list[str]:
+    """Return context-scoped resolved tool names, falling back to process-level list."""
+    scoped = _last_resolved_tool_names_var.get()
+    if scoped is not None:
+        return scoped
+    return _last_resolved_tool_names
+
+
+def set_last_resolved_tool_names(names: list[str]) -> None:
+    """Set context-scoped resolved tool names and update the process fallback list."""
+    global _last_resolved_tool_names
+    val = list(names) if names is not None else []
+    _last_resolved_tool_names = val
+    _last_resolved_tool_names_var.set(val)
 
 
 # Legacy toolset names (old _tools-suffixed names -> tool name lists)
@@ -263,8 +284,7 @@ def get_tool_definitions(enabled_toolsets: Optional[list[str]] = None, disabled_
                 _tool_defs_cache[cache_key] = cached = result
                 _tool_defs_expiry[cache_key] = verdict_expiry[0]
     else:
-        global _last_resolved_tool_names
-        _last_resolved_tool_names = [t["function"]["name"] for t in cached]
+        set_last_resolved_tool_names([t["function"]["name"] for t in cached])
     # Always a shallow copy: run_agent appends memory/LCM schemas to its list; a
     # shared list would accumulate duplicate names (HTTP 400 from DeepSeek/Kimi/MiMo).
     return list(cached)
@@ -530,8 +550,8 @@ def _compute_tool_definitions(enabled_toolsets: Optional[list[str]] = None, disa
     from tools.kanban_toolset_context import scoped_kanban_toolset_selection
     with scoped_kanban_toolset_selection(enabled_toolsets):
         filtered_tools = _apply_dynamic_schemas(registry.get_definitions(tools_to_include, quiet=quiet_mode))
-    global _last_resolved_tool_names
-    _last_resolved_tool_names = [t["function"]["name"] for t in filtered_tools]
+    tool_names = [t["function"]["name"] for t in filtered_tools]
+    set_last_resolved_tool_names(tool_names)
 
     if not quiet_mode:
         print(f"🛠️  Final tool selection ({len(filtered_tools)} tools): {', '.join(_last_resolved_tool_names)}"
@@ -857,7 +877,9 @@ def _execute_tool(function_name: str, function_args: dict[str, Any], original_ar
     if function_name == "execute_code":
         # Prefer the caller's list so subagents can't overwrite the parent's
         # tool set via the process-global.
-        dispatch_kwargs["enabled_tools"] = enabled_tools if enabled_tools is not None else _last_resolved_tool_names
+        dispatch_kwargs["enabled_tools"] = (
+            enabled_tools if enabled_tools is not None else get_last_resolved_tool_names()
+        )
     else:
         dispatch_kwargs["user_task"] = user_task
 
@@ -1026,3 +1048,19 @@ def check_toolset_requirements() -> dict[str, bool]:
 def check_tool_availability(quiet: bool = False) -> tuple[list[str], list[dict]]:
     """(available_toolsets, unavailable_info)."""
     return registry.check_tool_availability(quiet=quiet)
+
+
+class _ModelToolsModule(sys.modules[__name__].__class__):  # type: ignore
+    def __getattribute__(self, name: str) -> Any:
+        if name == "_last_resolved_tool_names":
+            return get_last_resolved_tool_names()
+        return super().__getattribute__(name)
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        if name == "_last_resolved_tool_names":
+            set_last_resolved_tool_names(value)
+            return
+        super().__setattr__(name, value)
+
+
+sys.modules[__name__].__class__ = _ModelToolsModule

@@ -66,12 +66,58 @@ class _Companions:
     nbytes: int = 0
 
 
-def _companions(entry) -> _Companions:
-    if entry is None:
+def _companions(entry, model_id: str | None = None) -> _Companions:
+    if entry is not None:
+        mmproj, head = _asset_path(entry.mmproj), _asset_path(entry.mtp_head)
+        nbytes = sum(a.size_bytes for a, p in ((entry.mmproj, mmproj), (entry.mtp_head, head)) if p)
+        return _Companions(mmproj=mmproj, mtp_head=head, nbytes=nbytes)
+
+    # For browsed / sideloaded / non-catalog models: check sidecar and co-located files
+    if not model_id:
         return _Companions()
-    mmproj, head = _asset_path(entry.mmproj), _asset_path(entry.mtp_head)
-    nbytes = sum(a.size_bytes for a, p in ((entry.mmproj, mmproj), (entry.mtp_head, head)) if p)
-    return _Companions(mmproj=mmproj, mtp_head=head, nbytes=nbytes)
+
+    from hermes_cli.local_runtime.bootstrap import models_dir
+    found_mmproj: Path | None = None
+    found_head: Path | None = None
+
+    sidecar_path = models_dir() / f"{model_id}.hermes.json"
+    if sidecar_path.is_file():
+        try:
+            sidecar = json.loads(sidecar_path.read_text(encoding="utf-8"))
+            if sidecar.get("mmproj"):
+                p = Path(sidecar["mmproj"])
+                if not p.is_absolute():
+                    p = models_dir() / p
+                if p.is_file():
+                    found_mmproj = p
+            if sidecar.get("mtp_head"):
+                p = Path(sidecar["mtp_head"])
+                if not p.is_absolute():
+                    p = models_dir() / p
+                if p.is_file():
+                    found_head = p
+        except Exception:
+            pass
+
+    if found_mmproj is None and models_dir().is_dir():
+        for cand in models_dir().glob("mmproj*.gguf"):
+            if model_id.lower() in cand.name.lower() or "mmproj" in cand.name.lower():
+                found_mmproj = cand
+                break
+
+    nbytes = 0
+    if found_mmproj and found_mmproj.is_file():
+        try:
+            nbytes += found_mmproj.stat().st_size
+        except OSError:
+            pass
+    if found_head and found_head.is_file():
+        try:
+            nbytes += found_head.stat().st_size
+        except OSError:
+            pass
+
+    return _Companions(mmproj=found_mmproj, mtp_head=found_head, nbytes=nbytes)
 
 
 def _runs_mtp(entry, companions: _Companions) -> bool:
@@ -190,7 +236,7 @@ def preset_for_model(gguf: Path, budget: HardwareBudget,
         logger.warning("preset skip %s: %s", gguf.name, exc)
         return None
     entry = entry_for_model(model_id)
-    companions = _companions(entry)
+    companions = _companions(entry, model_id)
     is_mtp = _runs_mtp(entry, companions) if entry is not None else model_id in mtp_capable
 
     fixed_overhead = RUNTIME_OVERHEAD_BYTES + companions.nbytes
@@ -236,14 +282,15 @@ def preset_for_model(gguf: Path, budget: HardwareBudget,
     # carrying neither runs llama.cpp defaults.
     for k, v in header.sampling_defaults.items():
         keys.setdefault(k, v)
+    if header.supports_native_tool_calls or bool(header.chat_template):
+        keys["jinja"] = "on"
+    if companions.mmproj is not None:
+        keys["mmproj"] = str(companions.mmproj)
+    if companions.mtp_head is not None:
+        keys["model-draft"] = str(companions.mtp_head)
     if entry is not None:
         for k, v in (entry.sampling or {}).items():
             keys.setdefault(k, v)
-        if companions.mmproj is not None:
-            keys["mmproj"] = str(companions.mmproj)
-        if companions.mtp_head is not None:
-            # The model carries no MTP layers: draft-mtp drafts from the shipped head instead.
-            keys["model-draft"] = str(companions.mtp_head)
         if dflash is not None:
             keys["model-draft"] = str(_runs_dflash(entry))
             keys["spec-type"] = "draft-dflash"
@@ -273,7 +320,7 @@ def resident_footprint(gguf: Path, budget: HardwareBudget, window: int, *, draft
         logger.debug("footprint skip %s: %s", gguf.name, exc)
         return None
     entry = entry_for_model(model_id)
-    companions = _companions(entry)
+    companions = _companions(entry, model_id)
     fixed_overhead = RUNTIME_OVERHEAD_BYTES + companions.nbytes
     if drafting and _runs_dflash(entry) is not None:
         lean = replace(profile, kv_scale=1.0)
@@ -299,7 +346,7 @@ def _launch_footprint(gguf: Path, budget: HardwareBudget, engine_tag: str | None
         logger.debug("footprint skip %s: %s", gguf.name, exc)
         return None
     entry = entry_for_model(model_id)
-    companions = _companions(entry)
+    companions = _companions(entry, model_id)
     fixed_overhead = RUNTIME_OVERHEAD_BYTES + companions.nbytes
     requested = load_window_overrides().get(model_id)
     plan = plan_launch(profile, budget, mtp_capable=_runs_mtp(entry, companions),

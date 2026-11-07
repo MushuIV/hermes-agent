@@ -1031,7 +1031,25 @@ async def local_models_download_browsed(body: BrowsedDownloadBody):
     plan = [(_hf_url(body.repo, urllib.parse.quote(path)),
              bootstrap.models_dir() / path.rsplit("/", 1)[-1], 0) for path in paths]
 
+    companions = hf_browse.repo_companion_files(body.repo)
+    sidecar_data = {"repo": body.repo, "model_id": model_id}
+    if companions.get("mmproj"):
+        mm_path = companions["mmproj"]
+        mm_filename = mm_path.rsplit("/", 1)[-1]
+        plan.append((_hf_url(body.repo, urllib.parse.quote(mm_path)), bootstrap.models_dir() / mm_filename, 0))
+        sidecar_data["mmproj"] = mm_filename
+    if companions.get("mtp_head"):
+        head_path = companions["mtp_head"]
+        head_filename = head_path.rsplit("/", 1)[-1]
+        plan.append((_hf_url(body.repo, urllib.parse.quote(head_path)), bootstrap.models_dir() / head_filename, 0))
+        sidecar_data["mtp_head"] = head_filename
+
     def _fetch():
+        sidecar_file = bootstrap.models_dir() / f"{model_id}.hermes.json"
+        try:
+            sidecar_file.write_text(json.dumps(sidecar_data, indent=2), encoding="utf-8")
+        except Exception:
+            pass
         _run_download_plan(job, plan, model_id)
 
     _spawn_job(job, "lm-download-browsed", _fetch, download_label=model_id, resumable=True)
@@ -1056,5 +1074,24 @@ async def local_models_sideload(body: SideloadBody):
             os.symlink(src, dest)   # cross-volume fallback
         except OSError:
             await run_in_threadpool(shutil.copyfile, src, dest)
+
+    # Co-located companion mmproj linking if present in the same directory as src
+    sidecar_data: dict[str, str] = {"model_id": dest.stem}
+    for sibling in src.parent.glob("mmproj*.gguf"):
+        sibling_dest = bootstrap.models_dir() / sibling.name
+        if not sibling_dest.exists():
+            try:
+                os.link(sibling, sibling_dest)
+            except OSError:
+                with contextlib.suppress(Exception):
+                    shutil.copyfile(sibling, sibling_dest)
+        sidecar_data["mmproj"] = sibling.name
+        break
+
+    if len(sidecar_data) > 1:
+        sidecar_file = bootstrap.models_dir() / f"{dest.stem}.hermes.json"
+        with contextlib.suppress(Exception):
+            sidecar_file.write_text(json.dumps(sidecar_data, indent=2), encoding="utf-8")
+
     _refresh_runtime("post-sideload runtime refresh skipped")
     return {"ok": True, "model_id": dest.stem}

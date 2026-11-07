@@ -227,6 +227,20 @@ class GGUFHeader:
             return int(v)
         return self.head_dim_k
 
+    @property
+    def chat_template(self) -> str:
+        """The model's embedded tokenizer chat template, if present."""
+        tpl = self.metadata.get("tokenizer.chat_template")
+        return str(tpl) if isinstance(tpl, str) else ""
+
+    @property
+    def supports_native_tool_calls(self) -> bool:
+        """Whether the chat template embeds native tool calling patterns."""
+        tpl = self.chat_template.lower()
+        if not tpl:
+            return False
+        return any(marker in tpl for marker in ("tools", "tool_call", "<function", "[tool_calls]", "<|python_tag|>"))
+
 
 def split_parts(path: Path) -> list[Path] | None:
     """Every on-disk part of the split ``path`` belongs to, first part first; None when ``path`` is

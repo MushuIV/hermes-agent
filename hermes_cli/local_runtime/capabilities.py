@@ -72,8 +72,12 @@ def managed_model_supports_vision(model_id: str) -> bool | None:
         # ships a vision projector. Capability requires the projector to actually be on disk — a
         # model downloaded before its mmproj (partial delete, old layout) genuinely cannot see.
         entry = entry_for_model(model_id)
-        if entry is None:
-            return None
-        return (entry.mmproj is not None
-                and (assets_dir() / entry.mmproj.local_name).exists())
+        if entry is not None:
+            return (entry.mmproj is not None
+                    and (assets_dir() / entry.mmproj.local_name).exists())
+
+        from hermes_cli.local_runtime.presets import _companions
+        companions = _companions(None, model_id)
+        if companions.mmproj is not None and companions.mmproj.exists():
+            return True
     return None

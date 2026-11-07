@@ -1196,8 +1196,13 @@ def _run_review_fork(
     so the caller's error path still sees usage and the fork to clean up. ``explicit`` (/refine)
     keeps the ``background_review`` origin (curator/skill guards still apply) but marks the fork
     attended, so the unattended-only memory delete gate leaves the full operation set available."""
+    from agent.chat_completion_local import is_local_endpoint
+    is_local = is_local_endpoint(getattr(agent, "base_url", None) or "")
+    review_max_iter = 4 if is_local else _REVIEW_MAX_ITERATIONS
+    if task_cfg and "max_iterations" in task_cfg:
+        review_max_iter = int(task_cfg["max_iterations"])
     st.review_agent, _rt, _routed = build_cache_parity_fork(
-        agent, task_cfg, max_iterations=_REVIEW_MAX_ITERATIONS)
+        agent, task_cfg, max_iterations=review_max_iter)
     st.review_agent._review_attended = explicit
     _track_review_fork(agent, st.review_agent, register=True)
     from hermes_cli.plugins import set_thread_tool_whitelist, clear_thread_tool_whitelist

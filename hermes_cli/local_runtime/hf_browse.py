@@ -120,6 +120,31 @@ def repo_files(repo: str) -> list[HFFileGroup]:
     return groups
 
 
+def repo_companion_files(repo: str) -> dict[str, str]:
+    """Find companion files (mmproj, mtp head, draft) in a Hugging Face repo tree.
+    Returns: dict mapping kind ('mmproj', 'mtp_head', 'draft') -> path in repo.
+    """
+    try:
+        url = f"{_HF}/api/models/{urllib.parse.quote(repo)}/tree/main?recursive=true"
+        files = _get_json(url)
+    except Exception:
+        return {}
+
+    companions: dict[str, str] = {}
+    for f in files:
+        path = str(f.get("path", ""))
+        if not path.lower().endswith(".gguf"):
+            continue
+        name = path.rsplit("/", 1)[-1].lower()
+        if name.startswith("mmproj") and "mmproj" not in companions:
+            companions["mmproj"] = path
+        elif (name.startswith("mtp-") or "mtp" in name) and "mtp_head" not in companions:
+            companions["mtp_head"] = path
+        elif "draft" in name and "draft" not in companions:
+            companions["draft"] = path
+    return companions
+
+
 def rough_fit(total_bytes: int, budget) -> str:
     """Coarse pre-download verdict from file size alone (GGUF file size ≈ in-memory weights);
     the GGUF header refines this after download. Bands match the catalog pills' language."""

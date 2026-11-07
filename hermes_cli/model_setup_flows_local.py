@@ -144,6 +144,10 @@ def _model_flow_local(config, current_model=""):
     labels = [_row_label(r, active_id) for r in choices]
     labels += [f"  {m['id']} — {m['size_label']} · on disk" + ("  ← currently active" if m["id"] == active_id else "")
                for m in staged]
+    idx_hf = len(labels)
+    labels.append("  🔍 Search & download from Hugging Face (GGUF)...")
+    idx_sideload = len(labels)
+    labels.append("  📂 Import / sideload a local .gguf file from disk...")
     labels.append("Leave unchanged")
     skipped = len(rows) - len(choices)
     if skipped:
@@ -154,6 +158,57 @@ def _model_flow_local(config, current_model=""):
     idx = _prompt_provider_choice(labels, default=default, title="Select a local model (★ recommended for this machine):")
     if idx is None or idx == len(labels) - 1:
         print("No change.")
+        return
+
+    # Sideload flow
+    if idx == idx_sideload:
+        path_str = input("  Enter path to local .gguf file: ").strip().strip('"').strip("'")
+        if not path_str:
+            print("No file entered. Cancelled.")
+            return
+        res = asyncio.run(lm.local_models_sideload(lm.SideloadBody(path=path_str)))
+        model_id = res.get("model_id")
+        if not model_id:
+            print("Sideload failed.")
+            return
+        job_id = _start(lm, lambda: lm.local_models_activate(lm.ModelActivateBody(model_id=model_id)))
+        if job_id is not None and _follow_job(lm, job_id) == "done":
+            print(f"Default model set to: {model_id} (via Local models · llama.cpp)")
+        return
+
+    # Hugging Face search / download flow
+    if idx == idx_hf:
+        repo_str = input("  Enter Hugging Face repo (e.g. Qwen/Qwen2.5-Coder-7B-Instruct-GGUF): ").strip()
+        if not repo_str:
+            print("No repo entered. Cancelled.")
+            return
+        try:
+            from hermes_cli.local_runtime import hardware, hf_browse
+            budget = hardware.probe_budget(planning=True)
+            groups = hf_browse.priced_repo_files(repo_str, budget)
+        except Exception as exc:
+            print(f"  ✗ Failed to inspect repo: {exc}")
+            return
+        if not groups:
+            print("  No .gguf files found in repo.")
+            return
+        group_labels = [f"  {g.label} ({lm._human_gb(g.total_bytes)}) — {g.fit or 'fits'}" for g in groups]
+        g_idx = _prompt_provider_choice(group_labels, default=0, title=f"Select quant from {repo_str}:")
+        if g_idx is None:
+            print("Cancelled.")
+            return
+        chosen_group = groups[g_idx]
+        if not status["runtime_installed"]:
+            if not prompt_yes_no(f"  Download the llama.cpp engine ({status['configured_tag']})?", True):
+                print("No change.")
+                return
+            job_id = _start(lm, lambda: lm.local_models_runtime_install(lm.RuntimeInstallBody()))
+            if job_id is None or _follow_job(lm, job_id) != "done":
+                return
+        download_body = lm.BrowsedDownloadBody(repo=repo_str, paths=list(chosen_group.paths))
+        job_id = _start(lm, lambda: lm.local_models_download_browsed(download_body))
+        if job_id is not None and _follow_job(lm, job_id) == "done":
+            staged_id = _start(lm, lambda: lm.local_models_activate(lm.ModelActivateBody(model_id=download_body.repo.split('/')[-1])))
         return
 
     if idx < len(choices):

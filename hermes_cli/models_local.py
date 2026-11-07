@@ -269,6 +269,48 @@ def fetch_ollama_local_models(
     return probe_ollama_local_models(base_url, timeout, headers=headers)
 
 
+def probe_ollama_model_info(
+    base_url: Optional[str] = None,
+    model_name: str = "",
+    timeout: float = 3.0,
+    headers: Optional[dict[str, str]] = None,
+) -> dict[str, Any]:
+    """Inspect model details, native context length, and capabilities via Ollama's POST /api/show."""
+    if not model_name:
+        return {}
+    root = _ollama_endpoint_root(base_url)
+    request_headers = {
+        "User-Agent": hermes_user_agent(),
+        "Content-Type": "application/json",
+        **(headers or _get_ollama_native_headers(root)),
+    }
+    payload = json.dumps({"model": model_name}).encode("utf-8")
+    req = urllib.request.Request(
+        root.rstrip("/") + "/api/show",
+        data=payload,
+        headers=request_headers,
+        method="POST",
+    )
+    try:
+        with _urlopen_model_catalog_request(req, timeout=timeout) as resp:
+            data = json.loads(resp.read().decode("utf-8", errors="replace"))
+    except Exception:
+        return {}
+
+    info: dict[str, Any] = {"model": model_name}
+    model_info = data.get("model_info", {})
+    if isinstance(model_info, dict):
+        for k, v in model_info.items():
+            if k.endswith(".context_length") and isinstance(v, (int, float)):
+                info["context_length"] = int(v)
+                break
+    caps = [str(c).lower() for c in (data.get("capabilities") or [])]
+    info["capabilities"] = caps
+    info["tools"] = "tools" in caps
+    info["vision"] = "vision" in caps or any("projector" in str(k) for k in model_info)
+    return info
+
+
 def _same_ollama_native_root(left: str, right: str) -> bool:
     """Return True when two Ollama/OpenAI-style base URLs share an API root."""
     left_root = _root_for_ollama_native_api(left).rstrip("/")

@@ -61,7 +61,7 @@ class Rule:
 # Heuristic rules print as warnings until a frozen replay (`python -m scripts.code_health.replay`)
 # shows most of their hits on merged PRs are real problems; flip a rule to blocking with that
 # evidence in the PR. Reviewers' samples put these between ~12% and ~60% precision.
-WARN_UNTIL_REPLAYED = False
+WARN_UNTIL_REPLAYED = True
 
 RULES: tuple[Rule, ...] = (
     # Swallowed exceptions: the top statically-catchable bug cause in the fix sample.

@@ -65,16 +65,25 @@ load_hermes_dotenv(hermes_home=_hermes_home, project_env=Path(__file__).parent.p
 
 # ── Panic logger: crashes otherwise leave no forensics (stdout is the JSON-RPC pipe, stderr doesn't
 # flush before exit) → append every unhandled exception to the crash log + one-line stderr summary.
-_CRASH_LOG = os.path.join(_hermes_home, "logs", "tui_gateway_crash.log")
+def _get_crash_log_path() -> str:
+    try:
+        home = get_hermes_home()
+    except Exception:
+        home = _hermes_home
+    return os.path.join(home, "logs", "tui_gateway_crash.log")
+
+
+_CRASH_LOG = _get_crash_log_path()
 
 
 def _record_crash(kind: str, exc_type, exc_value, exc_tb, *, thread_name: str | None = None) -> None:
     import traceback
     trace = "".join(traceback.format_exception(exc_type, exc_value, exc_tb))
     suffix = f" · thread={thread_name}" if thread_name is not None else ""
+    crash_log = _get_crash_log_path()
     with contextlib.suppress(Exception):
-        os.makedirs(os.path.dirname(_CRASH_LOG), exist_ok=True)
-        with open(_CRASH_LOG, "a", encoding="utf-8") as f:
+        os.makedirs(os.path.dirname(crash_log), exist_ok=True)
+        with open(crash_log, "a", encoding="utf-8") as f:
             f.write(f"\n=== {kind} · {time.strftime('%Y-%m-%d %H:%M:%S')}{suffix} ===\n")
             f.write(trace)
     # The first line is what the user sees (gateway.stderr Activity line); the rest stays in the log.

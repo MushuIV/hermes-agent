@@ -4,6 +4,7 @@ Module state that tests monkeypatch (``get_memory_dir``, ``fcntl``/``msvcrt``) s
 in ``tools.memory_tool`` and is read lazily."""
 
 import itertools
+import json
 import logging
 import os
 import re
@@ -186,11 +187,13 @@ class MemoryStore:
     _MAX_CONSOLIDATION_FAILURES_PER_TURN = 3
 
     def __init__(self, memory_char_limit: int = 2200, user_char_limit: int = 1375, *,
-                 memory_enabled: bool = True, user_profile_enabled: bool = True):
+                 memory_enabled: bool = True, user_profile_enabled: bool = True,
+                 auto_archive_overflow: bool = False):
         self.memory_entries: list[str] = []
         self.user_entries: list[str] = []
         self.memory_char_limit, self.user_char_limit = memory_char_limit, user_char_limit
         self.memory_enabled, self.user_profile_enabled = memory_enabled, user_profile_enabled
+        self.auto_archive_overflow = auto_archive_overflow
         self._system_prompt_snapshot: dict[str, str] = {"memory": "", "user": ""}
         self._consolidation_failures = 0  # per turn; reset by reset_consolidation_failures()
 
@@ -303,7 +306,37 @@ class MemoryStore:
     @staticmethod
     def _path_for(target: str) -> Path:
         from tools import memory_tool  # get_memory_dir is monkeypatched there
-        return memory_tool.get_memory_dir() / ("USER.md" if target == "user" else "MEMORY.md")
+        memory_dir = memory_tool.get_memory_dir()
+        if target == "user":
+            try:
+                from hermes_cli.config import load_config_readonly
+                cfg = load_config_readonly() or {}
+                if cfg.get("memory", {}).get("shared_user_profile"):
+                    from hermes_constants import get_shared_hermes_dir
+                    shared_dir = get_shared_hermes_dir()
+                    shared_dir.mkdir(parents=True, exist_ok=True)
+                    shared_user = shared_dir / "USER.md"
+                    profile_user = memory_dir / "USER.md"
+                    if not shared_user.exists() and profile_user.exists():
+                        import shutil
+                        with suppress(Exception):
+                            shutil.copyfile(profile_user, shared_user)
+                    return shared_user
+            except Exception:
+                pass
+        return memory_dir / ("USER.md" if target == "user" else "MEMORY.md")
+
+    def _archive_to_cold_storage(self, target: str, entry: str) -> None:
+        """Append an evicted entry to memory_archive.jsonl."""
+        try:
+            from tools import memory_tool
+            archive_path = memory_tool.get_memory_dir() / "memory_archive.jsonl"
+            archive_path.parent.mkdir(parents=True, exist_ok=True)
+            record = {"timestamp": time.time(), "target": target, "content": entry}
+            with open(archive_path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(record, ensure_ascii=False) + "\n")
+        except Exception as e:
+            logger.warning("Cold archive write failed: %s", e)
 
     def _entries_for(self, target: str) -> list[str]:
         return self.user_entries if target == "user" else self.memory_entries
@@ -400,7 +433,7 @@ class MemoryStore:
             self._write_file(path, result[0])
             return self._success_response(target, result[1], **extra_fields)
 
-    def add(self, target: str, content: str) -> dict[str, Any]:
+    def add(self, target: str, content: str, *, auto_archive: bool = False) -> dict[str, Any]:
         """Append a new entry. Returns error if it would exceed the char limit."""
         content = content.strip()
         if not content:
@@ -411,12 +444,87 @@ class MemoryStore:
         def _add(entries, limit):
             if content in entries:
                 return self._success_response(target, "Entry already exists (no duplicate added).")
-            if len(ENTRY_DELIMITER.join(entries + [content])) > limit:
-                return self._add_overflow(target, content, limit)
-            return entries + [content], "Entry added."
+            current_entries = list(entries)
+            archived = []
+            if len(ENTRY_DELIMITER.join(current_entries + [content])) > limit:
+                should_auto = auto_archive or getattr(self, "auto_archive_overflow", False)
+                if should_auto and len(content) <= limit:
+                    while current_entries and len(ENTRY_DELIMITER.join(current_entries + [content])) > limit:
+                        evicted = current_entries.pop(0)
+                        self._archive_to_cold_storage(target, evicted)
+                        archived.append(evicted)
+                else:
+                    return self._add_overflow(target, content, limit)
+            msg = "Entry added."
+            if archived:
+                msg += f" (Archived {len(archived)} oldest entry/entries to cold storage to preserve character limit)."
+            return current_entries + [content], msg
         # Append-only: skip the drift guard (appending never clobbers foreign
         # content) but still refuse a failed read — add rewrites the WHOLE file.
         return self._mutate(target, _add, skip_drift=True)
+
+    def search(self, target: str, query: str) -> dict[str, Any]:
+        """Search across hot (active) memory entries and cold archive entries."""
+        query_lower = query.lower().strip()
+        if not query_lower:
+            return _error("Query cannot be empty.", "missing_content")
+
+        hot_matches = [
+            {"tier": "hot", "target": target, "content": e}
+            for e in self._entries_for(target)
+            if query_lower in e.lower()
+        ]
+
+        cold_matches = []
+        try:
+            from tools import memory_tool
+            archive_path = memory_tool.get_memory_dir() / "memory_archive.jsonl"
+            if archive_path.is_file():
+                with open(archive_path, "r", encoding="utf-8") as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        record = json.loads(line)
+                        if record.get("target") == target and query_lower in record.get("content", "").lower():
+                            cold_matches.append({"tier": "cold", "target": target, "content": record["content"]})
+        except Exception:
+            pass
+
+        return {
+            "success": True,
+            "query": query,
+            "total_matches": len(hot_matches) + len(cold_matches),
+            "results": hot_matches + cold_matches,
+        }
+
+    def restore(self, target: str, query: str) -> dict[str, Any]:
+        """Find an entry in cold storage matching query, remove from cold storage, and add to active memory."""
+        query_lower = query.lower().strip()
+        if not query_lower:
+            return _error("Query cannot be empty.", "missing_content")
+        from tools import memory_tool
+        archive_path = memory_tool.get_memory_dir() / "memory_archive.jsonl"
+        if not archive_path.is_file():
+            return _error("No cold memory archive found.", "no_match")
+        try:
+            lines = archive_path.read_text(encoding="utf-8").splitlines()
+            matched_record = None
+            remaining_lines = []
+            for line in lines:
+                if not line.strip():
+                    continue
+                record = json.loads(line)
+                if matched_record is None and record.get("target") == target and query_lower in record.get("content", "").lower():
+                    matched_record = record
+                else:
+                    remaining_lines.append(line)
+            if not matched_record:
+                return _error(f"No entry matching '{query}' found in cold storage.", "no_match")
+            archive_path.write_text("\n".join(remaining_lines) + ("\n" if remaining_lines else ""), encoding="utf-8")
+            return self.add(target, matched_record["content"])
+        except Exception as e:
+            return _error(f"Restore failed: {e}", "restore_failed")
 
     def replace(self, target: str, old_text: str, new_content: str,
                 matched_entry: Optional[str] = None) -> dict[str, Any]:

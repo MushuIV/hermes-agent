@@ -138,23 +138,32 @@ def _mirror_config_to_env(defaults, _file_has_terminal_config):
         terminal_config.pop("cwd", None)
 
     # TERMINAL_CWD is force-exported (beats stale .env) except inside a gateway process,
-    # whose config bridge already set it. Ask whether THIS process imported gateway.run:
-    # its _HERMES_GATEWAY env marker is inherited by every shell the gateway's terminal
-    # tool spawns, so a `hermes chat` launched there would keep the gateway's directory.
+    # whose config bridge already set it, or under multiplexing/routed profiles where
+    # the process-wide environment belongs to the host/launch profile.
     _is_gateway = "gateway.run" in sys.modules
+    try:
+        from agent.secret_scope import is_multiplex_active, serves_routed_profile
+        _is_multiplex = is_multiplex_active() or serves_routed_profile()
+    except Exception:
+        _is_multiplex = False
+
     for config_key, env_var in _TERMINAL_ENV_MAPPINGS.items():
         if config_key not in terminal_config:
             continue
         val = terminal_config[config_key]
+        str_val = json.dumps(val) if isinstance(val, (list, dict)) else str(val)
         if env_var == "TERMINAL_CWD":
-            if not _is_gateway:
-                os.environ[env_var] = str(val)
-        elif _file_has_terminal_config or env_var not in os.environ:
-            os.environ[env_var] = json.dumps(val) if isinstance(val, (list, dict)) else str(val)
+            if not _is_gateway and not _is_multiplex:
+                os.environ[env_var] = str_val
+        elif not _is_multiplex and _file_has_terminal_config:
+            os.environ[env_var] = str_val
+        elif env_var not in os.environ:
+            os.environ[env_var] = str_val
 
     browser_config = defaults.get("browser", {})
     if "inactivity_timeout" in browser_config:
-        os.environ["BROWSER_INACTIVITY_TIMEOUT"] = str(browser_config["inactivity_timeout"])
+        if not _is_multiplex or "BROWSER_INACTIVITY_TIMEOUT" not in os.environ:
+            os.environ["BROWSER_INACTIVITY_TIMEOUT"] = str(browser_config["inactivity_timeout"])
 
     # Only non-empty / non-"auto" auxiliary values are bridged so auto-detection still works.
     auxiliary_config = defaults.get("auxiliary", {})
@@ -165,19 +174,22 @@ def _mirror_config_to_env(defaults, _file_has_terminal_config):
         for field, env_var in env_map.items():
             val = str(task_cfg.get(field, "")).strip()
             if val and not (field == "provider" and val == "auto"):
-                os.environ[env_var] = val
+                if not _is_multiplex or env_var not in os.environ:
+                    os.environ[env_var] = val
 
     security_config = defaults.get("security", {})
     if isinstance(security_config, dict):
         redact = security_config.get("redact_secrets")
         if redact is not None:
-            os.environ["HERMES_REDACT_SECRETS"] = str(redact).lower()
+            if not _is_multiplex or "HERMES_REDACT_SECRETS" not in os.environ:
+                os.environ["HERMES_REDACT_SECRETS"] = str(redact).lower()
 
     # Session-search index knobs (hermes_state reads the env carriers).
     sessions_config = defaults.get("sessions", {})
     if isinstance(sessions_config, dict):
         if "search_slow_ms" in sessions_config:
-            os.environ["HERMES_SEARCH_SLOW_MS"] = str(sessions_config["search_slow_ms"])
+            if not _is_multiplex or "HERMES_SEARCH_SLOW_MS" not in os.environ:
+                os.environ["HERMES_SEARCH_SLOW_MS"] = str(sessions_config["search_slow_ms"])
 
 
 def _cli_config_defaults():

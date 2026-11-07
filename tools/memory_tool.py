@@ -115,7 +115,11 @@ _STORE_ACTIONS = {
     "patch": (lambda store, target, content, old_text, entry=None: store.patch(target, old_text, content, entry),
               lambda label, content, old_text: (f"patch in {label}",
                                                 f"entry matching: {old_text}\nspan '{old_text}' becomes: {content} "
-                                                "(rest of the entry is kept)"))}
+                                                "(rest of the entry is kept)")),
+    "search": (lambda store, target, content, old_text, entry=None: store.search(target, content or old_text),
+               lambda label, content, old_text: (f"search {label}", content or old_text or "")),
+    "restore": (lambda store, target, content, old_text, entry=None: store.restore(target, content or old_text),
+                lambda label, content, old_text: (f"restore into {label}", content or old_text or ""))}
 
 
 def _batch_op_line(op: dict[str, Any]) -> str:
